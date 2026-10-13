@@ -4,13 +4,20 @@
 Runs in GitHub Actions on a schedule. No video is downloaded or re-uploaded:
 the JSON only stores Javtiful's own stream URLs (played direct from their hosts).
 
+Data source: the JSON feed API at /shorts/feed (cursor-paged). The HTML page
+scrape is kept only as a fallback, because bot protection can serve a
+challenge page to datacenter runners instead of the real page.
+
 Merge rules:
 - New feed items are appended (deduped by uid).
 - Existing entries are refreshed with fresh feed data (URLs can change).
 - Entries are NEVER deleted by the sync, except uids listed in removed.json
   (manual blocklist: add a uid there to permanently hide a short).
-- Feed items whose full-video slug does NOT end with '-reducing-mosaic'
-  are skipped (the app only carries Reducing Mosaic).
+- Feed items whose full-video slug is present but does NOT end with
+  '-reducing-mosaic' are skipped (the app only carries Reducing Mosaic).
+  Items with no full-video URL are kept (the feed is verified Reducing
+  Mosaic only; the app hides the Watch-Full-Video button when the URL
+  is missing).
 """
 import json
 import re
@@ -21,34 +28,39 @@ from datetime import datetime, timezone
 
 BASE = "https://javtiful.com"
 SHORTS_PAGE = BASE + "/shorts"
+FEED_URL = BASE + "/shorts/feed"
 MAX_ITEMS = 500
 MAX_FEED_PAGES = 25
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/json,*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": BASE + "/",
-}
+BROWSER_UA = (
+    "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36"
+)
 
 SHORTS_JSON = "shorts.json"
 REMOVED_JSON = "removed.json"
 
 
-def http_get(url):
-    req = urllib.request.Request(url, headers=HEADERS, method="GET")
+def http_get(url, accept):
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": BROWSER_UA,
+            "Accept": accept,
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": BASE + "/",
+        },
+        method="GET",
+    )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.read().decode("utf-8", errors="replace")
+            return resp.status, resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         print(f"HTTP {e.code} for {url}")
-        return None
+        return e.code, None
     except Exception as e:
         print(f"GET failed {url}: {e}")
-        return None
+        return None, None
 
 
 def absolutize(url):
@@ -98,10 +110,9 @@ def map_item(item):
     if not uid:
         return None
     full = absolutize(str(item.get("fullVideoUrl") or item.get("full_video_url") or ""))
-    if not full:
-        full = absolutize(str(item.get("url") or ""))
-    # Only Reducing Mosaic shorts (full-video slug suffix check, no extra request).
-    if "-reducing-mosaic" not in full:
+    # Full-video URL present but not Reducing Mosaic -> skip.
+    # Full-video URL absent -> keep (feed is verified Reducing Mosaic only).
+    if full and "-reducing-mosaic" not in full:
         return None
     stream = pick_media_url(item)
     if not stream:
@@ -109,18 +120,13 @@ def map_item(item):
     actress = item.get("actress") or {}
     if not isinstance(actress, dict):
         actress = {}
-    try:
-        likes = int(item.get("likes") or 0)
-    except (TypeError, ValueError):
-        likes = 0
-    try:
-        comments = int(item.get("comments") or 0)
-    except (TypeError, ValueError):
-        comments = 0
-    try:
-        shares = int(item.get("shares") or 0)
-    except (TypeError, ValueError):
-        shares = 0
+
+    def to_int(value):
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
     return {
         "uid": uid,
         "caption": str(item.get("caption") or ""),
@@ -132,9 +138,9 @@ def map_item(item):
             "handle": str(actress.get("handle") or ""),
             "avatar": absolutize(str(actress.get("avatar") or "")),
         },
-        "likes": likes,
-        "comments": comments,
-        "shares": shares,
+        "likes": to_int(item.get("likes")),
+        "comments": to_int(item.get("comments")),
+        "shares": to_int(item.get("shares")),
     }
 
 
@@ -151,50 +157,76 @@ def parse_config(html):
         return None
 
 
-def fetch_feed_pages():
-    """Return (items, ) from the initial page + cursor-paged feed endpoint."""
-    html = http_get(SHORTS_PAGE)
-    if not html:
+def collect_from_feed_payload(data, items, seen):
+    """Append mapped items from one feed-API payload. Returns next cursor."""
+    if not isinstance(data, dict):
+        return ""
+    if data.get("success") is False:
+        print("Feed API returned success=false")
+        return ""
+    batch = data.get("items") or data.get("data") or []
+    for raw in batch:
+        mapped = map_item(raw)
+        if mapped and mapped["uid"] not in seen:
+            seen.add(mapped["uid"])
+            items.append(mapped)
+    nxt = data.get("cursor") or data.get("nextCursor") or data.get("next_cursor") or ""
+    return str(nxt)
+
+
+def fetch_via_feed_api():
+    """Primary path: /shorts/feed JSON API, cursor-paged."""
+    items, seen = [], set()
+    status, body = http_get(FEED_URL, "application/json, */*")
+    if body is None:
+        print("Feed API first page failed")
         return []
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError:
+        print("Feed API first page was not JSON "
+              f"(status={status}, bytes={len(body)})")
+        return []
+    cursor = collect_from_feed_payload(data, items, seen)
+    pages = 0
+    while cursor and pages < MAX_FEED_PAGES:
+        pages += 1
+        url = FEED_URL + "?cursor=" + urllib.request.quote(cursor)
+        status, body = http_get(url, "application/json, */*")
+        if body is None:
+            break
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            print(f"Feed page {pages} was not JSON, stopping pagination")
+            break
+        before = len(items)
+        nxt = collect_from_feed_payload(data, items, seen)
+        if len(items) == before or not nxt or nxt == cursor:
+            break
+        cursor = nxt
+    print(f"Feed API: {len(items)} shorts ({pages} extra pages)")
+    return items
+
+
+def fetch_via_html():
+    """Fallback path: embedded JSON config in the /shorts HTML page."""
+    status, html = http_get(SHORTS_PAGE, "text/html,application/xhtml+xml,*/*")
+    if html is None:
+        return []
+    print(f"HTML fallback: status={status}, bytes={len(html)}, "
+          f"has_config={'data-short-config' in html}")
     config = parse_config(html)
     if not config:
         print("No embedded shorts config found on page")
         return []
-    items = []
-    seen = set()
+    items, seen = [], set()
     for raw in config.get("items") or []:
         mapped = map_item(raw)
         if mapped and mapped["uid"] not in seen:
             seen.add(mapped["uid"])
             items.append(mapped)
-    cursor = config.get("cursor") or ""
-    feed_url = config.get("feedUrl") or "/shorts/feed"
-    pages = 0
-    while cursor and pages < MAX_FEED_PAGES:
-        pages += 1
-        url = absolutize(feed_url) + "?cursor=" + urllib.request.quote(str(cursor))
-        body = http_get(url)
-        if not body:
-            break
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            # Feed endpoint did not return JSON — stop paging, keep what we have.
-            print("Feed page did not return JSON, stopping pagination")
-            break
-        batch = data.get("items") or data.get("data") or []
-        added = 0
-        for raw in batch:
-            mapped = map_item(raw)
-            if mapped and mapped["uid"] not in seen:
-                seen.add(mapped["uid"])
-                items.append(mapped)
-                added += 1
-        nxt = data.get("cursor") or data.get("nextCursor") or data.get("next_cursor") or ""
-        if not added or not nxt or nxt == cursor:
-            break
-        cursor = nxt
-    print(f"Fetched {len(items)} shorts from feed ({pages} extra pages)")
+    print(f"HTML fallback: {len(items)} shorts from first page")
     return items
 
 
@@ -214,7 +246,10 @@ def main():
     for entry in existing.get("items") or []:
         if isinstance(entry, dict) and entry.get("uid"):
             by_uid[str(entry["uid"])] = entry
-    fresh = fetch_feed_pages()
+    fresh = fetch_via_feed_api()
+    if not fresh:
+        print("Feed API returned nothing, trying HTML fallback")
+        fresh = fetch_via_html()
     if not fresh and not by_uid:
         print("Feed empty and no existing data — refusing to write empty file")
         return 1
