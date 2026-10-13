@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Sync Javtiful Shorts feed -> shorts.json (public static file for CM FLIX app).
 
-Runs in GitHub Actions on a schedule. No video is downloaded or re-uploaded:
-the JSON only stores Javtiful's own stream URLs (played direct from their hosts).
+Runs in GitHub Actions on a schedule. The JSON's streamUrl starts as
+Javtiful's own URL; the Railway mirror worker (railway-short repo) later
+replaces it in place with a Bunny URL after mirroring the HLS package.
+The sync NEVER overwrites a non-Javtiful streamUrl, so a mirrored entry
+stays mirrored.
 
 Data source: the JSON feed API at /shorts/feed (cursor-paged). The HTML page
 scrape is kept only as a fallback, because bot protection can serve a
@@ -15,7 +18,9 @@ header on paged requests, trying several header names on 409.
 
 Merge rules:
 - New feed items are appended (deduped by uid).
-- Existing entries are refreshed with fresh feed data (URLs can change).
+- Existing entries are refreshed with fresh feed data, EXCEPT streamUrl:
+  if an entry's streamUrl is no longer a Javtiful URL (mirrored to Bunny
+  by the Railway worker), the mirrored URL is kept.
 - Entries are NEVER deleted by the sync, except uids listed in removed.json
   (manual blocklist: add a uid there to permanently hide a short).
 - Feed items whose full-video slug is present but does NOT end with
@@ -28,6 +33,7 @@ import http.cookiejar
 import json
 import re
 import sys
+import urllib.parse
 import urllib.request
 import urllib.error
 from datetime import datetime, timezone
@@ -85,6 +91,19 @@ def absolutize(url):
     if url.startswith("/"):
         return BASE + url
     return url
+
+
+# Hosts whose stream URLs come from Javtiful itself. Anything else in
+# streamUrl was written by the mirror worker (Bunny) and must be kept.
+JAVTIFUL_HOSTS = {"shorts.avtik.com", "javtiful.com", "www.javtiful.com"}
+
+
+def is_javtiful_url(url):
+    """True if the URL still points at one of Javtiful's own hosts."""
+    try:
+        return urllib.parse.urlparse(url).hostname in JAVTIFUL_HOSTS
+    except Exception:
+        return False
 
 
 def pick_media_url(item):
@@ -317,7 +336,13 @@ def main():
     for entry in fresh:
         if entry["uid"] in removed_set:
             continue
-        by_uid[entry["uid"]] = entry  # refresh wins
+        old = by_uid.get(entry["uid"])
+        if old and old.get("streamUrl") \
+                and not is_javtiful_url(old["streamUrl"]):
+            # Already mirrored to Bunny by the Railway worker: keep the
+            # mirrored URL, refresh everything else.
+            entry["streamUrl"] = old["streamUrl"]
+        by_uid[entry["uid"]] = entry  # refresh wins (except mirrored URL)
     for uid in list(by_uid):
         if uid in removed_set:
             del by_uid[uid]
