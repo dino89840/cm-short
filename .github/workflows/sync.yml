@@ -1,0 +1,30 @@
+name: Sync Shorts
+
+on:
+  schedule:
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Sync shorts.json
+        run: python3 sync_shorts.py
+
+      - name: Commit if changed
+        run: |
+          git config user.name "shorts-sync"
+          git config user.email "shorts-sync@users.noreply.github.com"
+          git add shorts.json
+          git diff --cached --quiet || git commit -m "Sync shorts"
+          git push
