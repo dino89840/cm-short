@@ -19,6 +19,7 @@ Merge rules:
   Mosaic only; the app hides the Watch-Full-Video button when the URL
   is missing).
 """
+import http.cookiejar
 import json
 import re
 import sys
@@ -40,6 +41,14 @@ BROWSER_UA = (
 SHORTS_JSON = "shorts.json"
 REMOVED_JSON = "removed.json"
 
+# One opener with a cookie jar for the whole run: the feed API ties a feed
+# session (cursor) to session cookies. Without persisting cookies, the
+# paged request comes back 409 and pagination stops after the first 8.
+_COOKIE_JAR = http.cookiejar.CookieJar()
+_OPENER = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(_COOKIE_JAR)
+)
+
 
 def http_get(url, accept):
     req = urllib.request.Request(
@@ -53,7 +62,7 @@ def http_get(url, accept):
         method="GET",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with _OPENER.open(req, timeout=30) as resp:
             return resp.status, resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         print(f"HTTP {e.code} for {url}")
