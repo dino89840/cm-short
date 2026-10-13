@@ -8,6 +8,11 @@ Data source: the JSON feed API at /shorts/feed (cursor-paged). The HTML page
 scrape is kept only as a fallback, because bot protection can serve a
 challenge page to datacenter runners instead of the real page.
 
+The paged feed request can come back 409 without the page's CSRF token, so
+the script first tries to read the embedded config block from the /shorts
+HTML (which carries `csrf` + the first cursor) and sends the token as a
+header on paged requests, trying several header names on 409.
+
 Merge rules:
 - New feed items are appended (deduped by uid).
 - Existing entries are refreshed with fresh feed data (URLs can change).
@@ -50,17 +55,16 @@ _OPENER = urllib.request.build_opener(
 )
 
 
-def http_get(url, accept):
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": BROWSER_UA,
-            "Accept": accept,
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": BASE + "/",
-        },
-        method="GET",
-    )
+def http_get(url, accept, extra_headers=None):
+    headers = {
+        "User-Agent": BROWSER_UA,
+        "Accept": accept,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": BASE + "/shorts",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+    req = urllib.request.Request(url, headers=headers, method="GET")
     try:
         with _OPENER.open(req, timeout=30) as resp:
             return resp.status, resp.read().decode("utf-8", errors="replace")
@@ -183,59 +187,103 @@ def collect_from_feed_payload(data, items, seen):
     return str(nxt)
 
 
-def fetch_via_feed_api():
-    """Primary path: /shorts/feed JSON API, cursor-paged."""
-    items, seen = [], set()
-    status, body = http_get(FEED_URL, "application/json, */*")
-    if body is None:
-        print("Feed API first page failed")
-        return []
-    try:
-        data = json.loads(body)
-    except json.JSONDecodeError:
-        print("Feed API first page was not JSON "
-              f"(status={status}, bytes={len(body)})")
-        return []
-    cursor = collect_from_feed_payload(data, items, seen)
-    pages = 0
-    while cursor and pages < MAX_FEED_PAGES:
-        pages += 1
-        url = FEED_URL + "?cursor=" + urllib.request.quote(cursor)
-        status, body = http_get(url, "application/json, */*")
-        if body is None:
-            break
-        try:
-            data = json.loads(body)
-        except json.JSONDecodeError:
-            print(f"Feed page {pages} was not JSON, stopping pagination")
-            break
-        before = len(items)
-        nxt = collect_from_feed_payload(data, items, seen)
-        if len(items) == before or not nxt or nxt == cursor:
-            break
-        cursor = nxt
-    print(f"Feed API: {len(items)} shorts ({pages} extra pages)")
-    return items
+def fetch_html_config():
+    """Read the embedded JSON config from the /shorts HTML page.
 
-
-def fetch_via_html():
-    """Fallback path: embedded JSON config in the /shorts HTML page."""
+    Returns (items, csrf, cursor). Empty items + empty csrf means the page
+    fetch was blocked or had no config (caller falls back to the feed API).
+    """
     status, html = http_get(SHORTS_PAGE, "text/html,application/xhtml+xml,*/*")
     if html is None:
-        return []
-    print(f"HTML fallback: status={status}, bytes={len(html)}, "
+        return [], "", ""
+    print(f"HTML: status={status}, bytes={len(html)}, "
           f"has_config={'data-short-config' in html}")
     config = parse_config(html)
     if not config:
         print("No embedded shorts config found on page")
-        return []
+        return [], "", ""
     items, seen = [], set()
     for raw in config.get("items") or []:
         mapped = map_item(raw)
         if mapped and mapped["uid"] not in seen:
             seen.add(mapped["uid"])
             items.append(mapped)
-    print(f"HTML fallback: {len(items)} shorts from first page")
+    csrf = str(config.get("csrf") or "")
+    cursor = str(config.get("cursor") or "")
+    print(f"HTML config: {len(items)} shorts, csrf={'yes' if csrf else 'no'}, "
+          f"cursor={'yes' if cursor else 'no'}")
+    return items, csrf, cursor
+
+
+def fetch_feed_page(cursor, csrf):
+    """One paged /shorts/feed call. Tries CSRF header names on 409.
+
+    Returns (items, next_cursor). Empty items means the call failed.
+    """
+    url = FEED_URL + "?cursor=" + urllib.request.quote(cursor)
+    header_names = ["X-CSRF-TOKEN", "X-XSRF-TOKEN", "X-CSRFToken"]
+    attempts = [None]
+    if csrf:
+        attempts += [{name: csrf} for name in header_names]
+        attempts.append({"X-Requested-With": "XMLHttpRequest"})
+    for headers in attempts:
+        status, body = http_get(url, "application/json, */*", headers)
+        if status == 409 and headers is not None:
+            print(f"  paged request 409 with headers={list(headers)}; "
+                  "trying next variant")
+            continue
+        if body is None:
+            return [], ""
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            print(f"  paged request was not JSON (status={status})")
+            return [], ""
+        items, seen = [], set()
+        nxt = collect_from_feed_payload(data, items, seen)
+        if headers is not None:
+            print(f"  paged request OK with headers={list(headers)}")
+        return items, nxt
+    print("  paged request: all header variants got 409")
+    return [], ""
+
+
+def fetch_via_feed_api(seed_items=None, seed_cursor="", csrf=""):
+    """Cursor-paged /shorts/feed. Seed items/cursor (from HTML config) let
+    paging start without a separate no-cursor call."""
+    items, seen = [], set()
+    for entry in seed_items or []:
+        if entry["uid"] not in seen:
+            seen.add(entry["uid"])
+            items.append(entry)
+    cursor = seed_cursor
+    if not cursor:
+        status, body = http_get(FEED_URL, "application/json, */*")
+        if body is None:
+            print("Feed API first page failed")
+            return items
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError:
+            print("Feed API first page was not JSON "
+                  f"(status={status}, bytes={len(body)})")
+            return items
+        cursor = collect_from_feed_payload(data, items, seen)
+    pages = 0
+    while cursor and pages < MAX_FEED_PAGES:
+        pages += 1
+        batch, nxt = fetch_feed_page(cursor, csrf)
+        if not batch:
+            break
+        before = len(items)
+        for entry in batch:
+            if entry["uid"] not in seen:
+                seen.add(entry["uid"])
+                items.append(entry)
+        if len(items) == before or not nxt or nxt == cursor:
+            break
+        cursor = nxt
+    print(f"Feed API: {len(items)} shorts ({pages} extra pages)")
     return items
 
 
@@ -255,10 +303,14 @@ def main():
     for entry in existing.get("items") or []:
         if isinstance(entry, dict) and entry.get("uid"):
             by_uid[str(entry["uid"])] = entry
-    fresh = fetch_via_feed_api()
-    if not fresh:
-        print("Feed API returned nothing, trying HTML fallback")
-        fresh = fetch_via_html()
+    fresh = []
+    seed_items, csrf, seed_cursor = fetch_html_config()
+    if seed_items:
+        # HTML config gave us the first batch + csrf + cursor: page on.
+        fresh = fetch_via_feed_api(seed_items, seed_cursor, csrf)
+    else:
+        # HTML blocked or empty: feed API alone (8 items if paging 409s).
+        fresh = fetch_via_feed_api()
     if not fresh and not by_uid:
         print("Feed empty and no existing data — refusing to write empty file")
         return 1
