@@ -1,5 +1,5 @@
 {
- "updatedAt": "2026-10-14T05:08:37.005190+00:00",
+ "updatedAt": "2026-10-14T05:36:31.087284+00:00",
  "items": [
   {
    "uid": "7d86b212bb13e94436e0db5edaa9f654",
@@ -1475,7 +1475,7 @@
    "uid": "88ab55af68a12112a995cdc9bf1ae931",
    "caption": "SONE-248 Asuka Aka Part 2",
    "poster": "https://shorts.avtik.com/shorts/playback/88ab55af68a12112a995cdc9bf1ae931/v1/cover.jpg",
-   "streamUrl": "https://shorts.avtik.com/shorts/playback/88ab55af68a12112a995cdc9bf1ae931/v1/v720.m3u8",
+   "streamUrl": "https://tw.kyakya.xubi.org/shorts/88ab55af68a12112a995cdc9bf1ae931/v720.m3u8",
    "fullVideoUrl": "https://javtiful.com/video/90993/sone-248-reducing-mosaic",
    "actress": {
     "name": "Asuka Aka",
@@ -1490,7 +1490,7 @@
    "uid": "14c5b28a86676134c873c884eb1dfc48",
    "caption": "CJOD-527 Satsuki Nao Part 3",
    "poster": "https://shorts.avtik.com/shorts/playback/14c5b28a86676134c873c884eb1dfc48/v1/cover.jpg",
-   "streamUrl": "https://shorts.avtik.com/shorts/playback/14c5b28a86676134c873c884eb1dfc48/v1/v720.m3u8",
+   "streamUrl": "https://tw.kyakya.xubi.org/shorts/14c5b28a86676134c873c884eb1dfc48/v720.m3u8",
    "fullVideoUrl": "https://javtiful.com/video/112651/cjod-527-reducing-mosaic",
    "actress": {
     "name": "Satsuki Nao",
@@ -1505,7 +1505,7 @@
    "uid": "078c683e75a060baf8a0141dbc220ee2",
    "caption": "SNOS-398 Kakei Jun Part 3",
    "poster": "https://shorts.avtik.com/shorts/playback/078c683e75a060baf8a0141dbc220ee2/v1/cover.jpg",
-   "streamUrl": "https://shorts.avtik.com/shorts/playback/078c683e75a060baf8a0141dbc220ee2/v1/v720.m3u8",
+   "streamUrl": "https://tw.kyakya.xubi.org/shorts/078c683e75a060baf8a0141dbc220ee2/v720.m3u8",
    "fullVideoUrl": "https://javtiful.com/video/113751/snos-398-reducing-mosaic",
    "actress": {
     "name": "Kakei Jun",
@@ -1520,7 +1520,7 @@
    "uid": "5af272b9fc4e92797752818327d2495b",
    "caption": "JUQ-071 Kano Ai Part 2",
    "poster": "https://shorts.avtik.com/shorts/playback/5af272b9fc4e92797752818327d2495b/v1/cover.jpg",
-   "streamUrl": "https://shorts.avtik.com/shorts/playback/5af272b9fc4e92797752818327d2495b/v1/v720.m3u8",
+   "streamUrl": "https://tw.kyakya.xubi.org/shorts/5af272b9fc4e92797752818327d2495b/v720.m3u8",
    "fullVideoUrl": "https://javtiful.com/video/102650/juq-071-reducing-mosaic",
    "actress": {
     "name": "Kano Ai",
@@ -1535,7 +1535,7 @@
    "uid": "fcfdf75a8e44858021fa94e744cb26da",
    "caption": "SONE-248 Asuka Aka Part 3",
    "poster": "https://shorts.avtik.com/shorts/playback/fcfdf75a8e44858021fa94e744cb26da/v1/cover.jpg",
-   "streamUrl": "https://shorts.avtik.com/shorts/playback/fcfdf75a8e44858021fa94e744cb26da/v1/v720.m3u8",
+   "streamUrl": "https://tw.kyakya.xubi.org/shorts/fcfdf75a8e44858021fa94e744cb26da/v720.m3u8",
    "fullVideoUrl": "https://javtiful.com/video/90993/sone-248-reducing-mosaic",
    "actress": {
     "name": "Asuka Aka",
