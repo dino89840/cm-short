@@ -32,6 +32,7 @@ Merge rules:
 import http.cookiejar
 import html
 import json
+import random
 import re
 import sys
 import urllib.parse
@@ -462,6 +463,10 @@ def main():
         if poster and not entry.get("fullPoster"):
             entry["fullPoster"] = poster
     print(f"Full-video meta: fetched {meta_fetches} pages")
+    # Shuffle so the app's first-50 cap draws a random 50 of 500
+    # on every sync (no APK change needed). Backfill above already
+    # ran on newest-first order, so newest items keep meta priority.
+    random.shuffle(items)
     out = {
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "items": items,
