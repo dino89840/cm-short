@@ -30,6 +30,7 @@ Merge rules:
   is missing).
 """
 import http.cookiejar
+import html
 import json
 import re
 import sys
@@ -43,6 +44,12 @@ SHORTS_PAGE = BASE + "/shorts"
 FEED_URL = BASE + "/shorts/feed"
 MAX_ITEMS = 500
 MAX_FEED_PAGES = 25
+
+# Full-video meta backfill: how many full-video pages to fetch per sync run.
+# Each fetch is one extra request for one Short; items already carrying
+# fullTitle/fullPoster are never re-fetched, so the backfill finishes
+# over a few runs without hammering the site in one run.
+MAX_FULL_META_FETCHES = 100
 
 BROWSER_UA = (
     "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 "
@@ -104,6 +111,84 @@ def is_javtiful_url(url):
         return urllib.parse.urlparse(url).hostname in JAVTIFUL_HOSTS
     except Exception:
         return False
+
+
+def meta_content(html_text, prop):
+    """Content of the <meta property|name="prop"> tag.
+
+    Attribute-order agnostic: works whether content comes before or
+    after the property/name attribute.
+    """
+    for tag in re.findall(r"<meta\s+[^>]*>", html_text or "", re.IGNORECASE):
+        if re.search(
+            r"(?:property|name)\s*=\s*[\"']" + re.escape(prop) + r"[\"']",
+            tag,
+            re.IGNORECASE,
+        ):
+            m = re.search(
+                r"content\s*=\s*[\"']([^\"']*)[\"']",
+                tag,
+                re.IGNORECASE,
+            )
+            if m:
+                return m.group(1)
+    return ""
+
+
+# Trailing site-name suffix on detail titles, e.g.
+# "START-626 ... | Javtiful" / "START-626 ... - Javtiful".
+# Mirrors the backend javtifulParseDetailMeta regex
+# (dash / pipe / en-dash / em-dash separators).
+TITLE_SUFFIX_PATTERN = re.compile(r"\s*[-|\u2013\u2014]\s*Javtiful\s*$")
+
+
+def parse_full_video_meta(html_text, page_url):
+    """(title, poster) from a full-video detail page.
+
+    og:title (else <title>) with the trailing site-name suffix stripped;
+    og:image poster resolved against the page URL.
+    Returns ("", "") when the page carries no usable metadata.
+    """
+    body = html_text or ""
+    if not body:
+        return "", ""
+    poster = meta_content(body, "og:image")
+    title = meta_content(body, "og:title")
+    if not title:
+        m = re.search(
+            r"<title\b[^>]*>(.*?)</title>",
+            body,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if m:
+            title = m.group(1) or ""
+    title = html.unescape(title)
+    title = re.sub(r"\s+", " ", title).strip()
+    title = TITLE_SUFFIX_PATTERN.sub("", title).strip()
+    if poster:
+        poster = urllib.parse.urljoin(page_url or BASE, poster.strip())
+    return title, poster
+
+
+def fetch_full_video_meta(full_video_url):
+    """Fetch one full-video page and return its (title, poster).
+
+    Never raises: any failure returns ("", "") so one bad item cannot
+    break the whole sync — the item is retried on the next run.
+    """
+    if not full_video_url:
+        return "", ""
+    try:
+        status, body = http_get(
+            full_video_url,
+            "text/html,application/xhtml+xml,*/*",
+        )
+        if status != 200 or not body:
+            return "", ""
+        return parse_full_video_meta(body, full_video_url)
+    except Exception as e:
+        print(f"Full-video meta failed {full_video_url}: {e}")
+        return "", ""
 
 
 def pick_media_url(item):
@@ -342,6 +427,12 @@ def main():
             # Already mirrored to Bunny by the Railway worker: keep the
             # mirrored URL, refresh everything else.
             entry["streamUrl"] = old["streamUrl"]
+        if old:
+            # Full-video meta already fetched on an earlier run: keep it
+            # (fresh feed entries never carry these fields).
+            for field in ("fullTitle", "fullPoster"):
+                if old.get(field):
+                    entry[field] = old[field]
         by_uid[entry["uid"]] = entry  # refresh wins (except mirrored URL)
     for uid in list(by_uid):
         if uid in removed_set:
@@ -352,6 +443,25 @@ def main():
         if uid not in order:
             order.append(uid)
     items = [by_uid[u] for u in order[:MAX_ITEMS]]
+    # Backfill full-video title/poster for items that lack them.
+    # One page fetch per item, capped per run; failures leave the fields
+    # absent (retried next run) and never break the sync.
+    meta_fetches = 0
+    for entry in items:
+        if meta_fetches >= MAX_FULL_META_FETCHES:
+            break
+        if entry.get("fullTitle") and entry.get("fullPoster"):
+            continue
+        full_url = entry.get("fullVideoUrl") or ""
+        if not full_url:
+            continue
+        meta_fetches += 1
+        title, poster = fetch_full_video_meta(full_url)
+        if title and not entry.get("fullTitle"):
+            entry["fullTitle"] = title
+        if poster and not entry.get("fullPoster"):
+            entry["fullPoster"] = poster
+    print(f"Full-video meta: fetched {meta_fetches} pages")
     out = {
         "updatedAt": datetime.now(timezone.utc).isoformat(),
         "items": items,
